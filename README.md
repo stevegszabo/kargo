@@ -1,6 +1,8 @@
 # kargo
 
 ![screenshot](images/kargo-01.png)
+![screenshot](images/kargo-02.png)
+![screenshot](images/kargo-03.png)
 
 ```
 ADMIN_ACCOUNT_TOKEN_SIGNING_KEY=$(openssl rand -base64 48 | tr -d "=+/" | head -c 32)
