@@ -1,0 +1,258 @@
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: ProjectConfig
+metadata:
+  name: kargo-webapp-01
+spec:
+  promotionPolicies:
+  - stageSelector:
+      name: webapp-01-dev
+    autoPromotionEnabled: true
+  - stageSelector:
+      name: webapp-01-pat
+    autoPromotionEnabled: true
+  - stageSelector:
+      name: webapp-01-prd
+    autoPromotionEnabled: true
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Warehouse
+metadata:
+  name: webapp-01
+spec:
+  subscriptions:
+  - chart:
+      repoURL: https://szabos.github.io/helm-repository
+      name: webapp
+  - image:
+      repoURL: docker.io/steveszabo/webapp
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: webapp-01-metrics
+spec:
+  args:
+  - name: service
+  metrics:
+  - name: prometheus
+    count: 3
+    interval: 2m
+    failureLimit: 1
+    successCondition: result[0] >= 0.95
+    provider:
+      prometheus:
+        address: http://local-prometheus-server.base-prometheus.svc.cluster.local
+        query: |
+          sum(irate(
+            istio_requests_total{reporter="source", destination_service=~"{{args.service}}", response_code!~"5.*"}[2m]
+          )) /
+          sum(irate(
+            istio_requests_total{reporter="source", destination_service=~"{{args.service}}"}[2m]
+          ))
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: webapp-01-job
+spec:
+  args:
+  - name: image
+  - name: service
+  metrics:
+  - name: probe
+    provider:
+      job:
+        spec:
+          backoffLimit: 1
+          template:
+            spec:
+              restartPolicy: Never
+              containers:
+              - name: probe
+                image: "{{ args.image }}"
+                command: ["/usr/bin/curl", "-v", "-m 10", "-f", "{{ args.service }}"]
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: webapp-01-dev
+  annotations:
+    kargo.akuity.io/color: green
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: webapp-01
+    sources:
+      direct: true
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: webapp-01
+        vars:
+        - name: open_pull_request
+          value: "false"
+  verification:
+    analysisTemplates:
+    - name: webapp-01-metrics
+    args:
+    - name: service
+      value: webapp-01-dev.app-01-dev.svc.cluster.local
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: webapp-01-pat
+  annotations:
+    kargo.akuity.io/color: blue
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: webapp-01
+    sources:
+      stages:
+      - webapp-01-dev
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: webapp-01
+        vars:
+        - name: open_pull_request
+          value: "false"
+  verification:
+    analysisTemplates:
+    - name: webapp-01-metrics
+    args:
+    - name: service
+      value: webapp-01-pat.app-01-pat.svc.cluster.local
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: webapp-01-prd
+  annotations:
+    kargo.akuity.io/color: red
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: webapp-01
+    sources:
+      requiredSoakTime: 1m
+      stages:
+      - webapp-01-pat
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: webapp-01
+        vars:
+        - name: open_pull_request
+          value: "false"
+  verification:
+    analysisTemplates:
+    - name: webapp-01-metrics
+    args:
+    - name: service
+      value: webapp-01-prd.app-01-prd.svc.cluster.local
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: PromotionTask
+metadata:
+  name: webapp-01
+spec:
+  vars:
+  - name: workspace
+    value: application
+  - name: warehouse
+    value: webapp-01
+  - name: helm_chart
+    value: webapp
+  - name: container_image
+    value: docker.io/steveszabo/webapp
+  - name: helm_repository
+    value: https://szabos.github.io/helm-repository
+  - name: argo_repository
+    value: https://github.com/szabos/application.git
+  - name: argo_application_dirname
+    value: local/monster
+  - name: argo_application_chart_element
+    value: spec.source.targetRevision
+  - name: argo_application_image_element
+    value: spec.source.helm.parameters.1.value
+  - name: argo_namespace
+    value: base-argocd
+  - name: argo_branch
+    value: master
+  - name: open_pull_request
+    value: "false"
+  steps:
+
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.argo_repository }}
+      checkout:
+      - branch: ${{ vars.argo_branch }}
+        path: ./${{ vars.workspace }}
+
+  - uses: yaml-update
+    as: update
+    config:
+      path: ./${{ vars.workspace }}/${{ vars.argo_application_dirname }}/${{ ctx.stage }}.yaml
+      updates:
+      - key: ${{ vars.argo_application_chart_element }}
+        value: ${{ chartFrom(vars.helm_repository, vars.helm_chart, warehouse(vars.warehouse)).Version }}
+      - key: ${{ vars.argo_application_image_element }}
+        value: ${{ imageFrom(vars.container_image).Tag }}
+
+  - uses: git-commit
+    config:
+      path: ./${{ vars.workspace }}
+      message: ${{ task.outputs.update.commitMessage }}
+
+  - uses: git-push
+    as: push
+    config:
+      path: ./${{ vars.workspace }}
+      generateTargetBranch: ${{ vars.open_pull_request }}
+
+  - uses: git-open-pr
+    if: ${{ vars.open_pull_request == "true" }}
+    as: open
+    config:
+      repoURL: ${{ vars.argo_repository }}
+      createTargetBranch: true
+      sourceBranch: ${{ task.outputs.push.branch }}
+      targetBranch: ${{ vars.argo_branch }}
+
+  - uses: git-wait-for-pr
+    if: ${{ vars.open_pull_request == "true" }}
+    config:
+      repoURL: ${{ vars.argo_repository }}
+      prNumber: ${{ task.outputs.open.prNumber }}
+
+  - uses: argocd-update
+    config:
+      apps:
+      - name: ${{ ctx.stage }}
+        namespace: ${{ vars.argo_namespace }}
+        sources:
+        - repoURL: ${{ vars.helm_repository }}
+          chart: ${{ vars.helm_chart }}
+          desiredRevision: ${{ chartFrom(vars.helm_repository, vars.helm_chart, warehouse(vars.warehouse)).Version }}
+          updateTargetRevision: true
+          helm:
+            images:
+            - key: image.tag
+              value: ${{ imageFrom(vars.container_image).Tag }}
