@@ -1,5 +1,7 @@
 # kargo
 
+![screenshot](images/kargo-01.png)
+
 ```
 ADMIN_ACCOUNT_TOKEN_SIGNING_KEY=$(openssl rand -base64 48 | tr -d "=+/" | head -c 32)
 ADMIN_ACCOUNT_PASSWORD=$(openssl rand -base64 48 | tr -d "=+/" | head -c 32)
